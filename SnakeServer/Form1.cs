@@ -22,6 +22,9 @@ namespace SnakeServer
         private Egg egg;
         private volatile bool isGameOver = true; // 游戏状态标记
         private volatile bool matching = false;
+        private Dictionary<string, GameRoom> activeRooms = new Dictionary<string, GameRoom>();
+        private List<TcpClient> waitingClients = new List<TcpClient>();
+        private Dictionary<TcpClient, Thread> waitingMonitors = new Dictionary<TcpClient, Thread>();
 
         public Form1()
         {
@@ -29,7 +32,7 @@ namespace SnakeServer
             CheckForIllegalCrossThreadCalls = false; // 简化跨线程访问
         }
 
-        
+
 
         private void StartListening()
         {
@@ -38,219 +41,120 @@ namespace SnakeServer
             Thread thread = new Thread(AcceptClientsLoop);
             thread.IsBackground = true;
             thread.Start();
+
+            lstLog.AppendText("监听启动成功，等待客户端连接...\n");
         }
 
-        
+
+        private List<TcpClient> pendingClients = new List<TcpClient>();
+        private object lockObj = new object();
 
         private void AcceptClientsLoop()
         {
             while (true)
             {
-                // 每次开始时初始化参数，清空旧状态
-                isGameOver = false;
-                matching = true;
-                AcceptClients();
-                if (!matching)
-                    continue;
-                else{
-                    matching = false;
-                }
-                // 游戏结束后，等待游戏结束标志
-                while (!isGameOver)
-                {
-                    Thread.Sleep(100);
-                }
-
-                lstLog.AppendText("游戏结束，重新等待玩家连接...\n");
-
-                // 重新开始等待玩家连接
-            }
-        }
-
-        private void AcceptClients()
-        {
-            // 初始化参数
-            clients = new Dictionary<string, TcpClient>();
-            snakes = new Dictionary<string, Snake>();
-            directions = new Dictionary<string, DIRECTION>();
-            eaten = new Dictionary<string, bool>();
-
-
-            //while (clients.Count < 2)
-            //{
-            //    TcpClient client = listener.AcceptTcpClient();
-            //    string key = client.Client.RemoteEndPoint.ToString();
-            //    clients[key] = client;
-            //    directions[key] = DIRECTION.RIGHT;
-            //    snakes[key] = new Snake(new Point(5 + clients.Count * 10, 5));
-            //    eaten[key] = false;
-
-            //    lstLog.AppendText($"客户端 {key} 已连接。\n");
-
-            //    Thread t = new Thread(() => HandleClient(client, key));
-            //    t.IsBackground = true;
-            //    t.Start();
-
-            //    if (clients.Count == 2)
-            //    {
-            //        StartGame();  // 开启对局
-            //        lstLog.AppendText($"开启对局\n");
-            //    }
-            //}
-            
-            while (clients.Count < 2 && matching)
-            {
-                // 非阻塞检查是否有连接请求
-                if (listener.Pending())
+                try
                 {
                     TcpClient client = listener.AcceptTcpClient();
+                    string remote = client.Client.RemoteEndPoint.ToString();
 
-                    string uuid = Guid.NewGuid().ToString();
-                    string key = client.Client.RemoteEndPoint.ToString();
-                    clients[uuid] = client;
-                    directions[uuid] = DIRECTION.RIGHT;
-                    snakes[uuid] = new Snake(new Point(5 + clients.Count * 10, 5));
-                    eaten[uuid] = false;
-
-                    lstLog.AppendText($"客户端 {key} - {uuid} 已连接。\n");
-
-                    var initState = new GameState
+                    lock (lockObj)
                     {
-                        MyId = uuid
-                    };
-                    SendToClient(client, initState);
+                        waitingClients.Add(client);
+                        lstLog.AppendText($"新客户端 {remote} 加入等待队列。\n");
 
-                    Thread t = new Thread(() => HandleClient(client, uuid));
-                    t.IsBackground = true;
-                    t.Start();
+                        if (waitingClients.Count >= 2)
+                        {
+                            var player1 = waitingClients[0];
+                            var player2 = waitingClients[1];
+                            waitingClients.RemoveRange(0, 2);
 
-                    if (clients.Count == 2)
-                    {
-                        StartGame();
-                        lstLog.AppendText($"开启对局\n");
+                            string p1Id = Guid.NewGuid().ToString();
+                            string p2Id = Guid.NewGuid().ToString();
+
+                            var room = new GameRoom(lstLog, OnRoomGameOver);
+                            room.AddPlayer(p1Id, player1);
+                            room.AddPlayer(p2Id, player2);
+
+                            activeRooms[room.RoomId] = room;
+
+                            SendInitState(player1, p1Id);
+                            SendInitState(player2, p2Id);
+
+                            StartHandleClient(player1, p1Id, room);
+                            StartHandleClient(player2, p2Id, room);
+
+                            room.Start();
+
+                            lstLog.AppendText($"[房间 {room.RoomId}] 玩家 {p1Id} 和 {p2Id} 成功配对，开始游戏。\n");
+                        }
                     }
                 }
-                else
+                catch (Exception ex)
                 {
-                    Thread.Sleep(100); // 没有连接，休息一下
+                    lstLog.AppendText("接受客户端异常：" + ex.Message + "\n");
                 }
             }
-       
-
-
-        }
-        void SendToClient(TcpClient client, GameState state)
-        {
-            try
-            {
-                NetworkStream stream = client.GetStream();
-                string json = JsonConvert.SerializeObject(state);
-                byte[] data = Encoding.UTF8.GetBytes(json + "\n");
-                stream.Write(data, 0, data.Length);
-            }
-            catch (Exception ex)
-            {
-                lstLog.AppendText("发送 GameState 失败：" + ex.Message + "\n");
-            }
         }
 
 
-        private void HandleClient(TcpClient client, string key)
+
+
+
+        private void OnRoomGameOver(string roomId)
         {
-            NetworkStream stream = client.GetStream();
-            byte[] buffer = new byte[1024];
-            try
+            if (activeRooms.ContainsKey(roomId))
             {
+                activeRooms.Remove(roomId);
+                lstLog.AppendText($"房间 {roomId} 对局结束，释放资源。\n");
+            }
+        }
+
+        private void StartHandleClient(TcpClient client, string playerId, GameRoom room)
+        {
+            new Thread(() =>
+            {
+                NetworkStream stream = null;
+                try
+                {
+                    stream = client.GetStream(); // 这里可能抛出“非连接套接字”异常
+                }
+                catch (Exception ex)
+                {
+                    lstLog.AppendText($"[房间 {room.RoomId}] 玩家 {playerId} 获取流失败：{ex.Message}");
+                    room.HandleMessage(playerId, "{\"Type\": \"EXIT\"}");
+                    return;
+                }
+
+                byte[] buffer = new byte[1024];
+
                 while (true)
                 {
-                    int len = stream.Read(buffer, 0, buffer.Length);
-                    if (len <= 0) break;
-
-                    string json = Encoding.UTF8.GetString(buffer, 0, len);
-                    dynamic msg = JsonConvert.DeserializeObject(json);
-                    if (msg.Type == "DIRECTION")
+                    try
                     {
-                        string dirStr = msg.Direction.ToString();
-                        if (Enum.TryParse<DIRECTION>(dirStr, out var parsedDir))
-                        {
-                            directions[key] = parsedDir;
-                        }
-                        else
-                        {
-                            lstLog.AppendText($"收到非法方向: {dirStr}\n");
-                        }
-                    }
-                    if (msg.Type == "EXIT")
-                    {
-                        //lstLog.AppendText($"{key} 主动退出。\n");
-                        throw new Exception($"{key} 主动退出");
-                    }
+                        int len = stream.Read(buffer, 0, buffer.Length);
+                        if (len <= 0) break;
 
+                        string json = Encoding.UTF8.GetString(buffer, 0, len);
+                        room.HandleMessage(playerId, json);
+                    }
+                    catch
+                    {
+                        room.HandleMessage(playerId, "{\"Type\": \"EXIT\"}");
+                        break;
+                    }
                 }
-            }
-            catch (Exception ex)
-            {
-                lstLog.AppendText($"客户端 {key} 异常断开：{ex.Message}\n");
-                if (matching) {
-                    matching = false;
-                }
-                // 判断游戏是否仍在进行中
-               
-                timer1.Stop();
-                string winner = GetOtherKey(key);
-                Broadcast(new GameState
-                {
-                    IsGameOver = true,
-                    WinnerId = winner
-                });
-                lstLog.AppendText($"玩家 {key} 掉线，{winner} 获胜。\n");
-                isGameOver = true;
-            }
+            })
+            { IsBackground = true }.Start();
         }
 
-        private void StartGame()
+
+        private void SendInitState(TcpClient client, string uuid)
         {
-
-
-            // 初始化蛋
-            
-            
-            egg = new Egg(snakes);
-            timer1.Interval = 300;
-            // 初始化两条蛇（避免位置重叠）
-            var rnd = new Random();
-            var colors = new[] { Color.Blue, Color.Green, Color.Orange, Color.Purple };
-            int row1 = rnd.Next(5, 20);
-            int row2 = row1 + 5;
-            var keys = clients.Keys.ToList();
-            var a1 = new Snake(new Point(10, row1), DIRECTION.RIGHT, colors[0]);
-            snakes[keys[0]] = a1;
-            directions[keys[0]] = DIRECTION.RIGHT;
-            var a2 = new Snake(new Point(10, row2), DIRECTION.RIGHT, colors[1]);
-            snakes[keys[1]] = a2;
-            directions[keys[1]] = DIRECTION.RIGHT;
-            Dictionary<string, Point> np = new Dictionary<string, Point>();
-            np[keys[0]] = new Point(10, row1);
-            np[keys[1]] = new Point(10, row2);
-            // 初次新增label蛇身
-            eaten[keys[0]] = true;
-            eaten[keys[1]] = true;
-            var s = new GameState
-            {
-                Egg = egg.Position,
-                SnakesEat = eaten,
-                Colors = snakes.ToDictionary(k => k.Key, v => ColorTranslator.ToHtml(v.Value.Color)),
-                Directions = directions,
-                NextPostitions = np,
-                IsGameOver = false
-            };
-            Broadcast(s);
-
-
-
-            this.BeginInvoke((MethodInvoker)(() => timer1.Start()));
-
-            lstLog.AppendText("游戏开始！\n");
+            var init = new GameState { MyId = uuid };
+            string json = JsonConvert.SerializeObject(init);
+            byte[] data = Encoding.UTF8.GetBytes(json + "\n");
+            client.GetStream().Write(data, 0, data.Length);
         }
 
 
@@ -274,12 +178,6 @@ namespace SnakeServer
             }
         }
 
-        private string GetOtherKey(string key)
-        {
-
-            var otherKey = clients.Keys.FirstOrDefault(k => k != key);
-            return otherKey ?? ""; // 或者 return null，根据你希望的默认值
-        }
 
         private void Form1_Load(object sender, EventArgs e)
         {
