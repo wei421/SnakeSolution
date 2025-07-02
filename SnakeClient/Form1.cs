@@ -28,7 +28,7 @@ namespace SnakeClient
         private Dictionary<string, Brush> snakeBrushes;
         private Dictionary<string, Point> nextPositions;
         private Point eggPosition;
-        private Label eggLabel;
+        private PictureBox eggLabel;
         private string serverIp;
         private bool isGaming = false;
         
@@ -258,9 +258,13 @@ namespace SnakeClient
             if (eggLabel == null)
             {
                 //首次绘
-                eggLabel = new Label();
-                eggLabel.BackColor = Color.Red;
+                eggLabel = new PictureBox();
                 eggLabel.Size = new Size(gridSize, gridSize);
+                eggLabel.SizeMode = PictureBoxSizeMode.StretchImage;
+
+                // 加载苹果图标（你可以用自己的图片路径或资源）
+                eggLabel.Image = Properties.Resources.ap;
+
                 eggLabel.Location = new Point(p.X * gridSize, p.Y * gridSize);
                 panelGame.Controls.Add(eggLabel);
             }

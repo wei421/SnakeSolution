@@ -124,5 +124,11 @@
   <ItemGroup>
     <None Include="Resources\lose.wav" />
   </ItemGroup>
+  <ItemGroup>
+    <None Include="Resources\apple.bmp" />
+  </ItemGroup>
+  <ItemGroup>
+    <None Include="Resources\ap.png" />
+  </ItemGroup>
   <Import Project="$(MSBuildToolsPath)\Microsoft.CSharp.targets" />
 </Project>
